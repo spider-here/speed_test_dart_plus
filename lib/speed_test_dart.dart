@@ -10,11 +10,24 @@ import 'package:speed_test_dart/enums/file_size.dart';
 import 'package:sync/sync.dart';
 import 'package:xml/xml.dart';
 
+
 /// A Speed tester.
 class SpeedTestDart {
   /// Returns [Settings] from speedtest.net.
+
+  static const _xmlHeaders = {
+    'User-Agent': 'Mozilla/5.0',
+    'Accept': 'application/xml,text/xml,*/*',
+  };
+
+  static const _headers = {
+    'User-Agent': 'Mozilla/5.0',
+  };
+
+
   Future<Settings> getSettings() async {
-    final response = await http.get(Uri.parse(configUrl));
+    final response = await http.get(Uri.parse(configUrl),
+    headers: _xmlHeaders);
     final settings = Settings.fromXMLElement(
       XmlDocument.parse(response.body).getElement('settings'),
     );
@@ -23,7 +36,8 @@ class SpeedTestDart {
     for (final element in serversUrls) {
       if (serversConfig.servers.isNotEmpty) break;
       try {
-        final resp = await http.get(Uri.parse(element));
+        final resp = await http.get(Uri.parse(element),
+            headers: _xmlHeaders);
 
         serversConfig = ServersList.fromXMLElement(
           XmlDocument.parse(resp.body).getElement('settings'),
@@ -52,7 +66,7 @@ class SpeedTestDart {
     int retryCount = 2,
     int timeoutInSeconds = 2,
   }) async {
-    List<Server> serversToTest = [];
+    final List<Server> serversToTest = [];
 
     for (final server in servers) {
       final latencyUri = createTestUrl(server, 'latency.txt');
@@ -60,7 +74,8 @@ class SpeedTestDart {
 
       stopwatch.start();
       try {
-        await http.get(latencyUri).timeout(
+        await http.get(latencyUri,
+            headers: _headers).timeout(
               Duration(
                 seconds: timeoutInSeconds,
               ),
@@ -136,7 +151,8 @@ class SpeedTestDart {
         await Future.forEach(testData, (String td) async {
           await semaphore.acquire();
           try {
-            final data = await http.get(Uri.parse(td));
+            final data = await http.get(Uri.parse(td),
+                headers: _headers);
             tasks.add(data.bodyBytes.length);
           } finally {
             semaphore.release();
@@ -162,7 +178,7 @@ class SpeedTestDart {
     int retryCount = 3,
   }) async {
     double uploadSpeed = 0;
-    for (var s in servers) {
+    for (final s in servers) {
       final testData = generateUploadData(retryCount);
       final semaphore = Semaphore(simultaneousUploads);
       final stopwatch = Stopwatch()..start();

@@ -1,0 +1,80 @@
+# This file configures the analyzer, which statically analyzes Dart code to
+# check for errors, warnings, and lints.
+#
+# The issues identified by the analyzer are surfaced in the UI of Dart-enabled
+# IDEs (https://dart.dev/tools#ides-and-editors). The analyzer can also be
+# invoked from the command line by running `flutter analyze`.
+
+# The following line activates a set of recommended lints for Flutter apps,
+# packages, and plugins designed to encourage good coding practices.
+analyzer:
+  errors:
+    directives_ordering: ignore
+    prefer_expression_function_bodies: ignore
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # ---- Performance ----
+    avoid_function_literals_in_foreach_calls: true
+    avoid_unnecessary_containers: true
+    sized_box_for_whitespace: true
+    use_key_in_widget_constructors: true
+    avoid_redundant_argument_values: true
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    prefer_const_constructors_in_immutables: true
+
+    # ---- Error Prevention / Safety ----
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    avoid_empty_else: true
+    avoid_void_async: true
+    null_closures: true
+    avoid_catches_without_on_clauses: true
+    avoid_slow_async_io: true
+    prefer_final_fields: true
+    prefer_final_locals: true
+    cancel_subscriptions: true
+    close_sinks: true
+    unawaited_futures: true
+
+    # ---- Code Quality / Maintainability ----
+    always_put_required_named_parameters_first: true
+    annotate_overrides: true
+    avoid_renaming_method_parameters: true
+    avoid_bool_literals_in_conditional_expressions: true
+    avoid_multiple_declarations_per_line: true
+    avoid_print: true
+    avoid_single_cascade_in_expression_statements: true
+    avoid_annotating_with_dynamic: true
+    camel_case_types: true
+    directives_ordering: true
+    prefer_single_quotes: true
+    prefer_final_in_for_each: true
+    unnecessary_lambdas: true
+    unnecessary_this: true
+    unnecessary_await_in_return: true
+    prefer_expression_function_bodies: true
+
+    # ---- Style & Clean Code ----
+    constant_identifier_names: false # you can enable if needed
+    sort_child_properties_last: true
+    file_names: true
+    library_names: true
+    lines_longer_than_80_chars: false # disable if too strict
+    prefer_interpolation_to_compose_strings: true
+    prefer_typing_uninitialized_variables: true
+    use_super_parameters: true
+    use_full_hex_values_for_flutter_colors: true
+
+# Additional information about this file can be found at
+# https://dart.dev/guides/language/analysis-options

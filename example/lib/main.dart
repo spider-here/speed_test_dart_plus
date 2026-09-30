@@ -105,7 +105,7 @@ class _MyAppState extends State<MyApp> {
               const SizedBox(height: 10),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  primary: readyToTest && !loadingDownload
+                  backgroundColor: readyToTest && !loadingDownload
                       ? Colors.blue
                       : Colors.grey,
                 ),
@@ -145,7 +145,7 @@ class _MyAppState extends State<MyApp> {
               ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  primary: readyToTest ? Colors.blue : Colors.grey,
+                  backgroundColor: readyToTest ? Colors.blue : Colors.grey,
                 ),
                 onPressed: loadingUpload
                     ? null
