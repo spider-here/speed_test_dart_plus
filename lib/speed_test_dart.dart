@@ -16,18 +16,44 @@ class SpeedTestDart {
   /// Returns [Settings] from speedtest.net.
 
   static const _xmlHeaders = {
-    'User-Agent': 'Mozilla/5.0',
+    'User-Agent':
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
     'Accept': 'application/xml,text/xml,*/*',
   };
 
   static const _headers = {
-    'User-Agent': 'Mozilla/5.0',
-  };
+    'User-Agent':
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',  };
 
 
   Future<Settings> getSettings() async {
     final response = await http.get(Uri.parse(configUrl),
     headers: _xmlHeaders);
+
+
+
+    print('Speedtest config status: ${response.statusCode}');
+    print(
+      'Speedtest config content-type: '
+          '${response.headers['content-type']}',
+    );
+    print(
+      'Speedtest config body: '
+          '${response.body.substring(
+        0,
+        response.body.length > 300 ? 300 : response.body.length,
+      )}',
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Speedtest config request failed: '
+            '${response.statusCode} ${response.body}',
+      );
+    }
+
     final settings = Settings.fromXMLElement(
       XmlDocument.parse(response.body).getElement('settings'),
     );
@@ -53,6 +79,9 @@ class SpeedTestDart {
         .where(
           (s) => !ignoredIds.contains(s.id.toString()),
         )
+        .where(
+          (s) => s.country.trim().toLowerCase() != 'india',
+    )
         .toList();
     settings.servers.sort((a, b) => a.distance.compareTo(b.distance));
 
@@ -70,35 +99,53 @@ class SpeedTestDart {
 
     for (final server in servers) {
       final latencyUri = createTestUrl(server, 'latency.txt');
-      final stopwatch = Stopwatch();
 
-      stopwatch.start();
+      final stopwatch = Stopwatch()..start();
+
       try {
-        await http.get(latencyUri,
-            headers: _headers).timeout(
-              Duration(
-                seconds: timeoutInSeconds,
-              ),
-              onTimeout: (() => http.Response(
-                    '999999999',
-                    500,
-                  )),
-            );
-        // If a server fails the request, continue in the iteration
-      } catch (_) {
-        continue;
-      } finally {
-        stopwatch.stop();
-      }
+        final response = await http.get(
+          latencyUri,
+          headers: _headers,
+        ).timeout(
+          Duration(seconds: timeoutInSeconds),
+        );
 
-      final latency = stopwatch.elapsedMilliseconds / retryCount;
-      if (latency < 500) {
-        server.latency = latency;
-        serversToTest.add(server);
+        stopwatch.stop();
+
+        print(
+          'Latency ${latencyUri.host}: '
+              '${response.statusCode} '
+              '${response.body.length} bytes '
+              '${stopwatch.elapsedMilliseconds} ms',
+        );
+
+        if (response.statusCode != 200) {
+          continue;
+        }
+
+        final latency = stopwatch.elapsedMilliseconds.toDouble();
+
+        if (latency < 500) {
+          server.latency = latency;
+          serversToTest.add(server);
+        }
+      } catch (e) {
+        stopwatch.stop();
+        print('Latency error ${latencyUri.host}: $e');
       }
     }
 
-    serversToTest.sort((a, b) => a.latency.compareTo(b.latency));
+    serversToTest.sort(
+          (a, b) => a.latency.compareTo(b.latency),
+    );
+
+    print('Working servers: ${serversToTest.length}');
+
+    for (final server in serversToTest.take(5)) {
+      print(
+        'Server: ${server.url} | latency: ${server.latency} ms',
+      );
+    }
 
     return serversToTest;
   }
@@ -153,6 +200,18 @@ class SpeedTestDart {
           try {
             final data = await http.get(Uri.parse(td),
                 headers: _headers);
+
+            print(
+              'Download ${Uri.parse(td).host}: '
+                  '${data.statusCode} ${data.bodyBytes.length} bytes',
+            );
+
+            if (data.statusCode != 200) {
+              throw Exception(
+                'Download failed: ${data.statusCode}',
+              );
+            }
+
             tasks.add(data.bodyBytes.length);
           } finally {
             semaphore.release();
@@ -189,7 +248,23 @@ class SpeedTestDart {
           await semaphore.acquire();
           try {
             // do post request to measure time for upload
-            await http.post(Uri.parse(s.url), body: td);
+            final response = await http.post(
+              Uri.parse(s.url),
+              headers: _headers,
+              body: td,
+            );
+
+            print(
+              'Upload ${s.url}: '
+                  '${response.statusCode}',
+            );
+
+            if (response.statusCode < 200 || response.statusCode >= 300) {
+              throw Exception(
+                'Upload failed: ${response.statusCode}',
+              );
+            }
+
             tasks.add(td.length);
           } finally {
             semaphore.release();
