@@ -1,6 +1,7 @@
 library speed_test_dart;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
@@ -28,12 +29,81 @@ class SpeedTestDart {
         '(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',  };
 
 
-  Future<Settings> getSettings() async {
+  /// Country whose servers were used by the last [getSettings] call, or null
+  /// if the fallback [customServers] list was used.
+  String? lastCountry;
+
+  /// Fetches servers of [country] (e.g. 'Germany') from speedtest.net's
+  /// search API. Returns an empty list if the request is rejected.
+  Future<List<Server>> _fetchServersByCountry(String country) async {
+    final uri = Uri.parse(
+      'https://www.speedtest.net/api/js/servers'
+          '?engine=js&search=${Uri.encodeQueryComponent(country)}&limit=10',
+    );
+    final resp = await http.get(uri, headers: {
+      ..._headers,
+      'Accept': 'application/json',
+    });
+    if (resp.statusCode != 200) return <Server>[];
+
+    final list = jsonDecode(resp.body) as List;
+    return list.map((j) {
+      final lat = double.parse(j['lat'].toString());
+      final lon = double.parse(j['lon'].toString());
+      return Server(
+        int.parse(j['id'].toString()),
+        j['name'].toString(),
+        j['country'].toString(),
+        j['sponsor'].toString(),
+        j['host'].toString(),
+        j['url'].toString(),
+        lat,
+        lon,
+        99999999999,
+        99999999999,
+        Coordinate(lat, lon),
+      );
+    }).toList();
+  }
+
+  /// Tries [country], or, with [randomCountry], the countries in
+  /// [randomCountries] in random order, until one returns servers.
+  Future<List<Server>> _serversForCountry(
+      String? country,
+      bool randomCountry,
+      ) async {
+    final candidates = <String>[];
+    if (country != null && country.trim().isNotEmpty) {
+      candidates.add(country.trim());
+    } else if (randomCountry) {
+      candidates.addAll(List<String>.from(randomCountries)..shuffle());
+    }
+
+    for (final c in candidates) {
+      try {
+        final found = await _fetchServersByCountry(c);
+        if (found.isNotEmpty) {
+          lastCountry = c;
+          return found;
+        }
+      } catch (_) {
+        // try the next country
+      }
+    }
+    lastCountry = null;
+    return <Server>[];
+  }
+
+  /// By default a random country from [randomCountries] is used. Pass
+  /// [country] to force a specific one, or set [randomCountry] to false to
+  /// skip the country search. If nothing works (or the API is blocked),
+  /// [customServers] is used.
+  Future<Settings> getSettings({
+    String? country,
+    bool randomCountry = true,
+  }) async {
     final response = await http.get(Uri.parse(configUrl),
-    headers: _xmlHeaders);
-
-
-
+        headers: _xmlHeaders);
     print('Speedtest config status: ${response.statusCode}');
     print(
       'Speedtest config content-type: '
@@ -53,36 +123,37 @@ class SpeedTestDart {
             '${response.statusCode} ${response.body}',
       );
     }
-
     final settings = Settings.fromXMLElement(
       XmlDocument.parse(response.body).getElement('settings'),
     );
 
-    var serversConfig = ServersList(<Server>[]);
-    for (final element in serversUrls) {
-      if (serversConfig.servers.isNotEmpty) break;
-      try {
-        final resp = await http.get(Uri.parse(element),
-            headers: _xmlHeaders);
+    var servers = await _serversForCountry(country, randomCountry);
+    print('Speedtest country used: ${lastCountry ?? 'custom list'}');
 
-        serversConfig = ServersList.fromXMLElement(
-          XmlDocument.parse(resp.body).getElement('settings'),
+    // Fallback: our own list (constants.dart).
+    if (servers.isEmpty) {
+      servers = customServers.map((m) {
+        final lat = (m['lat']! as num).toDouble();
+        final lon = (m['lon']! as num).toDouble();
+        return Server(
+          m['id']! as int,
+          m['name']! as String,
+          m['country']! as String,
+          m['sponsor']! as String,
+          m['host']! as String,
+          m['url']! as String,
+          lat,
+          lon,
+          99999999999,
+          99999999999,
+          Coordinate(lat, lon),
         );
-      } catch (ex) {
-        serversConfig = ServersList(<Server>[]);
-      }
+      }).toList();
     }
 
-    final ignoredIds = settings.serverConfig.ignoreIds.split(',');
+    final serversConfig = ServersList(servers);
     serversConfig.calculateDistances(settings.client.geoCoordinate);
-    settings.servers = serversConfig.servers
-        .where(
-          (s) => !ignoredIds.contains(s.id.toString()),
-        )
-        .where(
-          (s) => s.country.trim().toLowerCase() != 'india',
-    )
-        .toList();
+    settings.servers = serversConfig.servers.toList();
     settings.servers.sort((a, b) => a.distance.compareTo(b.distance));
 
     return settings;
@@ -99,48 +170,35 @@ class SpeedTestDart {
 
     for (final server in servers) {
       final latencyUri = createTestUrl(server, 'latency.txt');
+      final stopwatch = Stopwatch();
 
-      final stopwatch = Stopwatch()..start();
-
+      stopwatch.start();
       try {
-        final response = await http.get(
-          latencyUri,
-          headers: _headers,
-        ).timeout(
-          Duration(seconds: timeoutInSeconds),
+        await http.get(latencyUri,
+            headers: _headers).timeout(
+          Duration(
+            seconds: timeoutInSeconds,
+          ),
+          onTimeout: (() => http.Response(
+            '999999999',
+            500,
+          )),
         );
-
+        // If a server fails the request, continue in the iteration
+      } catch (_) {
+        continue;
+      } finally {
         stopwatch.stop();
+      }
 
-        print(
-          'Latency ${latencyUri.host}: '
-              '${response.statusCode} '
-              '${response.body.length} bytes '
-              '${stopwatch.elapsedMilliseconds} ms',
-        );
-
-        if (response.statusCode != 200) {
-          continue;
-        }
-
-        final latency = stopwatch.elapsedMilliseconds.toDouble();
-
-        if (latency < 500) {
-          server.latency = latency;
-          serversToTest.add(server);
-        }
-      } catch (e) {
-        stopwatch.stop();
-        print('Latency error ${latencyUri.host}: $e');
+      final latency = stopwatch.elapsedMilliseconds / retryCount;
+      if (latency < 500) {
+        server.latency = latency;
+        serversToTest.add(server);
       }
     }
 
-    serversToTest.sort(
-          (a, b) => a.latency.compareTo(b.latency),
-    );
-
-    print('Working servers: ${serversToTest.length}');
-
+    serversToTest.sort((a, b) => a.latency.compareTo(b.latency));
     for (final server in serversToTest.take(5)) {
       print(
         'Server: ${server.url} | latency: ${server.latency} ms',
@@ -159,10 +217,10 @@ class SpeedTestDart {
 
   /// Returns urls for download test.
   List<String> generateDownloadUrls(
-    Server server,
-    int retryCount,
-    List<FileSize> downloadSizes,
-  ) {
+      Server server,
+      int retryCount,
+      List<FileSize> downloadSizes,
+      ) {
     final downloadUriBase = createTestUrl(server, 'random{0}x{0}.jpg?r={1}');
     final result = <String>[];
     for (final ds in downloadSizes) {
@@ -200,18 +258,10 @@ class SpeedTestDart {
           try {
             final data = await http.get(Uri.parse(td),
                 headers: _headers);
-
             print(
               'Download ${Uri.parse(td).host}: '
                   '${data.statusCode} ${data.bodyBytes.length} bytes',
             );
-
-            if (data.statusCode != 200) {
-              throw Exception(
-                'Download failed: ${data.statusCode}',
-              );
-            }
-
             tasks.add(data.bodyBytes.length);
           } finally {
             semaphore.release();
@@ -248,23 +298,11 @@ class SpeedTestDart {
           await semaphore.acquire();
           try {
             // do post request to measure time for upload
-            final response = await http.post(
-              Uri.parse(s.url),
-              headers: _headers,
-              body: td,
-            );
-
+            final response = await http.post(Uri.parse(s.url), body: td);
             print(
               'Upload ${s.url}: '
                   '${response.statusCode}',
             );
-
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-              throw Exception(
-                'Upload failed: ${response.statusCode}',
-              );
-            }
-
             tasks.add(td.length);
           } finally {
             semaphore.release();
