@@ -72,6 +72,25 @@ class _SpeedometerState extends State<Speedometer> {
 class _GaugePainter extends CustomPainter {
   _GaugePainter({required this.needle, required this.maxSpeed});
 
+  static final Paint _trackPaint = Paint()
+    ..color = const Color(0xFFE0E0E0)
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 14
+    ..strokeCap = StrokeCap.round;
+
+  static final Paint _valuePaint = Paint()
+    ..color = const Color(0xFF1565C0)
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 14
+    ..strokeCap = StrokeCap.round;
+
+  static final Paint _needlePaint = Paint()
+    ..color = const Color(0xFF212121)
+    ..strokeWidth = 3
+    ..strokeCap = StrokeCap.round;
+
+  static final Paint _hubPaint = Paint()..color = const Color(0xFF212121);
+
   final double needle;
   final double maxSpeed;
 
@@ -84,33 +103,18 @@ class _GaugePainter extends CustomPainter {
         ? 0.0
         : (needle / maxSpeed).clamp(0.0, 1.0).toDouble();
 
-    final track = Paint()
-      ..color = const Color(0xFFE0E0E0)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-    final valuePaint = Paint()
-      ..color = const Color(0xFF1565C0)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-
     canvas
-      ..drawArc(rect, pi, pi, false, track)
-      ..drawArc(rect, pi, pi * t, false, valuePaint);
+      ..drawArc(rect, pi, pi, false, _trackPaint)
+      ..drawArc(rect, pi, pi * t, false, _valuePaint);
 
     final angle = pi + pi * t;
     final needleEnd = Offset(
       center.dx + cos(angle) * (radius - 8),
       center.dy + sin(angle) * (radius - 8),
     );
-    final needlePaint = Paint()
-      ..color = const Color(0xFF212121)
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round;
     canvas
-      ..drawLine(center, needleEnd, needlePaint)
-      ..drawCircle(center, 6, Paint()..color = const Color(0xFF212121));
+      ..drawLine(center, needleEnd, _needlePaint)
+      ..drawCircle(center, 6, _hubPaint);
 
     _label(canvas, '0', Offset(center.dx - radius + 10, center.dy - 6));
     _label(

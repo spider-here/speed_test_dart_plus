@@ -3,12 +3,12 @@ library speed_test_dart;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:speed_test_dart/classes/classes.dart';
 import 'package:speed_test_dart/constants.dart';
 import 'package:speed_test_dart/enums/file_size.dart';
-import 'package:sync/sync.dart';
 import 'package:xml/xml.dart';
 
 /// A Speed tester.
@@ -29,6 +29,11 @@ class SpeedTestDart {
   /// Country whose servers were used by the last [getSettings] call, or null
   /// if the fallback [customServers] list was used.
   String? lastCountry;
+
+  /// Country the current test was launched from, taken from the speedtest
+  /// config. India and Israel are contacted only when this matches them.
+  String? _homeCountry;
+  String? _homeCountryCode;
 
   /// Fetches servers of [country] (e.g. 'Germany') from speedtest.net's
   /// search API. Returns an empty list if the request is rejected.
@@ -67,21 +72,34 @@ class SpeedTestDart {
   /// [randomCountries] in random order, until one returns servers.
   Future<List<Server>> _serversForCountry(
     String? country,
-    bool randomCountry,
-  ) async {
+    bool randomCountry, {
+    String? homeCountry,
+  }) async {
     final candidates = <String>[];
     if (country != null && country.trim().isNotEmpty) {
       candidates.add(country.trim());
-    } else if (randomCountry) {
-      candidates.addAll(List<String>.from(randomCountries)..shuffle());
+    } else {
+      if (homeCountry != null && homeCountry.trim().isNotEmpty) {
+        candidates.add(homeCountry.trim());
+      }
+      if (randomCountry) {
+        final rest = List<String>.from(randomCountries)..shuffle();
+        for (final name in rest) {
+          if (!candidates.contains(name)) candidates.add(name);
+        }
+      }
     }
 
     for (final c in candidates) {
+      if (!_mayContactCountry(c)) continue;
       try {
         final found = await _fetchServersByCountry(c);
-        if (found.isNotEmpty) {
+        final allowed = found
+            .where((server) => _mayContactCountry(server.country))
+            .toList();
+        if (allowed.isNotEmpty) {
           lastCountry = c;
-          return found;
+          return allowed;
         }
       } catch (_) {
         // try the next country
@@ -91,10 +109,10 @@ class SpeedTestDart {
     return <Server>[];
   }
 
-  /// By default a random country from [randomCountries] is used. Pass
-  /// [country] to force a specific one, or set [randomCountry] to false to
-  /// skip the country search. If nothing works (or the API is blocked),
-  /// [customServers] is used.
+  /// By default servers in the client's own country are used, because a
+  /// far server measures the international path rather than the line speed.
+  /// Pass [country] to force one, or set [randomCountry] to false to skip
+  /// the random fallback. If nothing works, [customServers] is used.
   Future<Settings> getSettings({
     String? country,
     bool randomCountry = true,
@@ -119,11 +137,19 @@ class SpeedTestDart {
         '${response.statusCode} ${response.body}',
       );
     }
-    final settings = Settings.fromXMLElement(
-      XmlDocument.parse(response.body).getElement('settings'),
-    );
+    final settingsElement =
+        XmlDocument.parse(response.body).getElement('settings');
+    final settings = Settings.fromXMLElement(settingsElement);
+    _homeCountryCode =
+        settingsElement?.getElement('client')?.getAttribute('country');
+    final homeCountry = _countryName(_homeCountryCode);
+    _homeCountry = homeCountry;
 
-    var servers = await _serversForCountry(country, randomCountry);
+    var servers = await _serversForCountry(
+      country,
+      randomCountry,
+      homeCountry: country == null ? homeCountry : null,
+    );
     print('Speedtest country used: ${lastCountry ?? 'custom list'}');
 
     // Fallback: our own list (constants.dart).
@@ -147,12 +173,32 @@ class SpeedTestDart {
       }).toList();
     }
 
+    servers = _withoutRestrictedServers(servers);
+
     final serversConfig = ServersList(servers);
     serversConfig.calculateDistances(settings.client.geoCoordinate);
     settings.servers = serversConfig.servers.toList();
     settings.servers.sort((a, b) => a.distance.compareTo(b.distance));
 
     return settings;
+  }
+
+  /// India and Israel are contacted only when the test launched there.
+  bool _mayContactCountry(String? country) {
+    final restricted = _restrictedCountry(country);
+    if (restricted == null) return true;
+    final homeName = _homeCountry?.trim().toLowerCase();
+    final homeCode = _homeCountryCode?.trim().toLowerCase();
+    if (restricted == 'india') {
+      return homeName == 'india' || homeCode == 'in';
+    }
+    return homeName == 'israel' || homeCode == 'il';
+  }
+
+  List<Server> _withoutRestrictedServers(List<Server> servers) {
+    return servers
+        .where((server) => _mayContactCountry(server.country))
+        .toList();
   }
 
   /// Returns a List[Server] with the best servers, ordered
@@ -162,38 +208,13 @@ class SpeedTestDart {
     int retryCount = 2,
     int timeoutInSeconds = 2,
   }) async {
-    final List<Server> serversToTest = [];
-
-    for (final server in servers) {
-      final latencyUri = createTestUrl(server, 'latency.txt');
-      final stopwatch = Stopwatch();
-
-      stopwatch.start();
-      try {
-        await http.get(latencyUri, headers: _headers).timeout(
-              Duration(
-                seconds: timeoutInSeconds,
-              ),
-              onTimeout: (() => http.Response(
-                    '999999999',
-                    500,
-                  )),
-            );
-        // If a server fails the request, continue in the iteration
-      } catch (_) {
-        continue;
-      } finally {
-        stopwatch.stop();
-      }
-
-      final latency = stopwatch.elapsedMilliseconds / retryCount;
-      if (latency < 500) {
-        server.latency = latency;
-        serversToTest.add(server);
-      }
-    }
-
-    serversToTest.sort((a, b) => a.latency.compareTo(b.latency));
+    final measured = await Future.wait(
+      servers.map(
+        (server) => _pingServer(server, retryCount, timeoutInSeconds),
+      ),
+    );
+    final serversToTest = measured.whereType<Server>().toList()
+      ..sort((a, b) => a.latency.compareTo(b.latency));
     for (final server in serversToTest.take(5)) {
       print(
         'Server: ${server.url} | latency: ${server.latency} ms',
@@ -203,11 +224,35 @@ class SpeedTestDart {
     return serversToTest;
   }
 
+  Future<Server?> _pingServer(
+    Server server,
+    int retryCount,
+    int timeoutInSeconds,
+  ) async {
+    if (!_mayContactCountry(server.country)) return null;
+    final stopwatch = Stopwatch()..start();
+    try {
+      await http
+          .get(createTestUrl(server, 'latency.txt'), headers: _headers)
+          .timeout(
+            Duration(seconds: timeoutInSeconds),
+            onTimeout: () => http.Response('999999999', 500),
+          );
+    } on Object {
+      return null;
+    } finally {
+      stopwatch.stop();
+    }
+
+    final latency = stopwatch.elapsedMilliseconds / retryCount;
+    if (latency >= 500) return null;
+    server.latency = latency;
+    return server;
+  }
+
   /// Creates [Uri] from [Server] and [String] file
   Uri createTestUrl(Server server, String file) {
-    return Uri.parse(
-      Uri.parse(server.url).toString().replaceAll('upload.php', file),
-    );
+    return Uri.parse(server.url.replaceAll('upload.php', file));
   }
 
   /// Returns urls for download test.
@@ -216,16 +261,16 @@ class SpeedTestDart {
     int retryCount,
     List<FileSize> downloadSizes,
   ) {
-    final downloadUriBase = createTestUrl(server, 'random{0}x{0}.jpg?r={1}');
+    final base = server.url.replaceAll(
+      'upload.php',
+      'random{0}x{0}.jpg?r={1}',
+    );
     final result = <String>[];
     for (final ds in downloadSizes) {
+      final size = FILE_SIZE_MAPPING[ds].toString();
+      final withSize = base.replaceAll('{0}', size);
       for (var i = 0; i < retryCount; i++) {
-        result.add(
-          downloadUriBase
-              .toString()
-              .replaceAll('%7B0%7D', FILE_SIZE_MAPPING[ds].toString())
-              .replaceAll('%7B1%7D', i.toString()),
-        );
+        result.add(withSize.replaceAll('{1}', '$i'));
       }
     }
     return result;
@@ -233,178 +278,274 @@ class SpeedTestDart {
 
   /// Returns download speed in Mb/s.
   ///
-  /// [onProgress] is called with the running speed in Mb/s while bytes are
-  /// still arriving (about 10 times a second). The last call equals the
-  /// returned value, so a speedometer can follow it until the test ends.
+  /// [simultaneousDownloads] files are fetched at once for [testDuration].
+  /// The result ignores the first two seconds, so connection startup is not
+  /// counted. [onProgress] receives that same running speed.
   Future<double> testDownloadSpeed({
     required List<Server> servers,
-    int simultaneousDownloads = 2,
+    int simultaneousDownloads = 6,
     int retryCount = 3,
     List<FileSize> downloadSizes = defaultDownloadSizes,
+    Duration testDuration = const Duration(seconds: 20),
     void Function(double mbps)? onProgress,
   }) async {
-    // Iterates over all servers, if one request fails, the next one is tried.
-    for (final s in servers) {
-      final testData = generateDownloadUrls(s, retryCount, downloadSizes);
-      final semaphore = Semaphore(simultaneousDownloads);
-      final tasks = <int>[];
-      final stopwatch = Stopwatch()..start();
-      final client = http.Client();
-      var totalBytes = 0;
-      var lastReportMs = -_progressIntervalMs;
-
-      void report() {
-        final callback = onProgress;
-        if (callback == null) return;
-        final elapsed = stopwatch.elapsedMilliseconds;
-        if (elapsed < _progressWarmupMs) return;
-        if (elapsed - lastReportMs < _progressIntervalMs) return;
-        lastReportMs = elapsed;
-        callback(_megabitsPerSecond(totalBytes, elapsed));
-      }
-
-      try {
-        await Future.forEach(testData, (String td) async {
-          await semaphore.acquire();
-          try {
-            final request = http.Request('GET', Uri.parse(td));
-            request.headers.addAll(_headers);
-            final response = await client.send(request);
-            var received = 0;
-            await for (final chunk in response.stream) {
-              received += chunk.length;
-              totalBytes += chunk.length;
-              report();
-            }
-            print(
-              'Download ${Uri.parse(td).host}: '
-              '${response.statusCode} $received bytes',
-            );
-            tasks.add(received);
-          } finally {
-            semaphore.release();
+    for (final server in servers) {
+      if (!_mayContactCountry(server.country)) continue;
+      final urls = generateDownloadUrls(
+        server,
+        retryCount,
+        downloadSizes,
+      ).reversed.toList();
+      if (urls.isEmpty) continue;
+      var cursor = 0;
+      final speed = await _measure(
+        connections: simultaneousDownloads,
+        testDuration: testDuration,
+        onProgress: onProgress,
+        transfer: (client, meter, stopped) async {
+          if (stopped()) return;
+          final index = cursor;
+          cursor++;
+          final url = '${urls[index % urls.length]}&n=$index';
+          final request = http.Request('GET', Uri.parse(url));
+          request.headers.addAll(_headers);
+          final response = await client.send(request);
+          await for (final chunk in response.stream) {
+            meter.add(chunk.length);
           }
-        });
-        stopwatch.stop();
-        final totalSize = tasks.reduce((a, b) => a + b);
-        final downloadSpeed = _megabitsPerSecond(
-          totalSize,
-          stopwatch.elapsedMilliseconds,
-        );
-        onProgress?.call(downloadSpeed);
-        return downloadSpeed;
-      } on Object {
-        continue;
-      } finally {
-        client.close();
-      }
+        },
+      );
+      if (speed != null) return speed;
     }
     return 0;
   }
 
   /// Returns upload speed in Mb/s.
   ///
-  /// [onProgress] is called with the running speed in Mb/s while bytes are
-  /// still being sent (about 10 times a second). The last call equals the
-  /// returned value, so a speedometer can follow it until the test ends.
+  /// [simultaneousUploads] uploads run at once for [testDuration]. The same
+  /// body is sent again until the time is up. The result ignores the first
+  /// two seconds. [onProgress] receives that same running speed.
   Future<double> testUploadSpeed({
     required List<Server> servers,
-    int simultaneousUploads = 2,
+    int simultaneousUploads = 6,
     int retryCount = 3,
+    Duration testDuration = const Duration(seconds: 20),
     void Function(double mbps)? onProgress,
   }) async {
-    for (final s in servers) {
-      final testData = generateUploadData(retryCount);
-      final semaphore = Semaphore(simultaneousUploads);
-      final stopwatch = Stopwatch()..start();
-      final tasks = <int>[];
-      final client = http.Client();
-      var totalBytes = 0;
-      var lastReportMs = -_progressIntervalMs;
-
-      void report() {
-        final callback = onProgress;
-        if (callback == null) return;
-        final elapsed = stopwatch.elapsedMilliseconds;
-        if (elapsed < _progressWarmupMs) return;
-        if (elapsed - lastReportMs < _progressIntervalMs) return;
-        lastReportMs = elapsed;
-        callback(_megabitsPerSecond(totalBytes, elapsed));
-      }
-
-      try {
-        await Future.forEach(testData, (String td) async {
-          await semaphore.acquire();
-          try {
-            final bytes = utf8.encode(td);
-            final request = _UploadRequest(
-              Uri.parse(s.url),
-              bytes,
-              (sent) {
-                totalBytes += sent;
-                report();
-              },
-            );
-            request.headers.addAll(_headers);
-            request.headers['content-type'] = 'text/plain; charset=utf-8';
-            final response = await client.send(request);
-            print(
-              'Upload ${s.url}: '
-              '${response.statusCode}',
-            );
-            await response.stream.drain<void>();
-            tasks.add(bytes.length);
-          } finally {
-            semaphore.release();
-          }
-        });
-        stopwatch.stop();
-        final totalSize = tasks.reduce((a, b) => a + b);
-        final uploadSpeed = _megabitsPerSecond(
-          totalSize,
-          stopwatch.elapsedMilliseconds,
-        );
-        onProgress?.call(uploadSpeed);
-        return uploadSpeed;
-      } on Object {
-        continue;
-      } finally {
-        client.close();
-      }
+    final body = _steadyUploadBody();
+    for (final server in servers) {
+      if (!_mayContactCountry(server.country)) continue;
+      final speed = await _measure(
+        connections: simultaneousUploads,
+        testDuration: testDuration,
+        onProgress: onProgress,
+        transfer: (client, meter, stopped) async {
+          if (stopped()) return;
+          final request = _UploadRequest(
+            Uri.parse(server.url),
+            body,
+            meter.add,
+          );
+          request.headers.addAll(_headers);
+          request.headers['content-type'] = 'text/plain; charset=utf-8';
+          final response = await client.send(request);
+          await response.stream.drain<void>();
+        },
+      );
+      if (speed != null) return speed;
     }
     return 0;
   }
 
-  /// Generate list of [String] urls for upload.
+  /// Generate list of upload bodies.
   List<String> generateUploadData(int retryCount) {
-    final random = Random();
     final result = <String>[];
-
     for (var sizeCounter = 1; sizeCounter < maxUploadSize + 1; sizeCounter++) {
       final size = sizeCounter * 200 * 1024;
-      final builder = StringBuffer()
-        ..write('content ${sizeCounter.toString()}=');
-
-      for (var i = 0; i < size; ++i) {
-        builder.write(hars[random.nextInt(hars.length)]);
-      }
-
+      final body = 'content $sizeCounter=${_filledText(size)}';
       for (var i = 0; i < retryCount; i++) {
-        result.add(builder.toString());
+        result.add(body);
       }
     }
-
     return result;
   }
 }
 
 const _progressIntervalMs = 100;
 const _progressWarmupMs = 200;
-const _uploadChunkSize = 16 * 1024;
+const _steadyWarmupMs = 2000;
+const _uploadChunkSize = 64 * 1024;
+const _steadyUploadBodySize = 4 * 1024 * 1024;
+
+const _countryNames = <String, String>{
+  'PK': 'Pakistan',
+  'DE': 'Germany',
+  'SG': 'Singapore',
+  'US': 'United States',
+  'GB': 'United Kingdom',
+  'FR': 'France',
+  'NL': 'Netherlands',
+  'IT': 'Italy',
+  'ES': 'Spain',
+  'SE': 'Sweden',
+  'CH': 'Switzerland',
+  'IN': 'India',
+  'IL': 'Israel',
+  'AE': 'United Arab Emirates',
+  'SA': 'Saudi Arabia',
+  'CA': 'Canada',
+  'AU': 'Australia',
+  'JP': 'Japan',
+  'BR': 'Brazil',
+};
 
 double _megabitsPerSecond(int bytes, int elapsedMs) {
   if (bytes <= 0 || elapsedMs <= 0) return 0;
-  return (bytes * 8 / 1024) / (elapsedMs / 1000) / 1000;
+  return bytes * 8 / elapsedMs / 1000;
+}
+
+String? _countryName(String? code) {
+  if (code == null || code.isEmpty) return null;
+  return _countryNames[code.toUpperCase()];
+}
+
+/// India and Israel are used only when the test is launched from that country.
+String? _restrictedCountry(String? country) {
+  final name = country?.trim().toLowerCase();
+  if (name == null || name.isEmpty) return null;
+  if (name == 'in' || name == 'india') return 'india';
+  if (name == 'il' || name == 'israel') return 'israel';
+  return null;
+}
+
+Uint8List? _cachedUploadBody;
+
+Uint8List _steadyUploadBody() {
+  final cached = _cachedUploadBody;
+  if (cached != null) return cached;
+  final prefix = utf8.encode('content1=');
+  final bytes = Uint8List(prefix.length + _steadyUploadBodySize);
+  bytes.setRange(0, prefix.length, prefix);
+  _fillLetters(bytes, prefix.length);
+  _cachedUploadBody = bytes;
+  return bytes;
+}
+
+String _filledText(int length) {
+  return String.fromCharCodes(_letterBuffer(length));
+}
+
+Uint8List _letterBuffer(int length) {
+  final bytes = Uint8List(length);
+  _fillLetters(bytes, 0);
+  return bytes;
+}
+
+void _fillLetters(Uint8List bytes, int start) {
+  if (start >= bytes.length) return;
+  const patternSize = 4096;
+  final pattern = Uint8List(patternSize);
+  final alphabet = hars.codeUnits;
+  for (var i = 0; i < patternSize; i++) {
+    pattern[i] = alphabet[i % alphabet.length];
+  }
+  var offset = start;
+  while (offset < bytes.length) {
+    final count = min(patternSize, bytes.length - offset);
+    bytes.setRange(offset, offset + count, pattern);
+    offset += count;
+  }
+}
+
+Future<double?> _measure({
+  required int connections,
+  required Duration testDuration,
+  required void Function(double mbps)? onProgress,
+  required Future<void> Function(
+    http.Client client,
+    _Meter meter,
+    bool Function() stopped,
+  ) transfer,
+}) async {
+  final meter = _Meter(onProgress);
+  final client = http.Client();
+  var timedOut = false;
+  var failed = false;
+  final timer = Timer(testDuration, () {
+    timedOut = true;
+    client.close();
+  });
+
+  try {
+    await Future.wait(
+      List.generate(max(connections, 1), (_) async {
+        while (!timedOut && !failed) {
+          try {
+            await transfer(client, meter, () => timedOut);
+          } on Object {
+            if (timedOut) return;
+            failed = true;
+            client.close();
+            return;
+          }
+        }
+      }),
+    );
+  } on Object {
+    failed = true;
+  } finally {
+    timer.cancel();
+    meter.stop();
+    client.close();
+  }
+
+  if (failed || meter.totalBytes <= 0) return null;
+  final speed = meter.mbps;
+  onProgress?.call(speed);
+  return speed;
+}
+
+class _Meter {
+  _Meter(this.onProgress);
+
+  final void Function(double mbps)? onProgress;
+  final Stopwatch _watch = Stopwatch()..start();
+
+  int totalBytes = 0;
+  int _lastReportMs = -_progressIntervalMs;
+  int? _markBytes;
+  int _markMs = 0;
+
+  void add(int bytes) {
+    totalBytes += bytes;
+    final elapsed = _watch.elapsedMilliseconds;
+    if (_markBytes == null && elapsed >= _steadyWarmupMs) {
+      _markBytes = totalBytes;
+      _markMs = elapsed;
+    }
+    _report();
+  }
+
+  double get mbps {
+    final elapsed = _watch.elapsedMilliseconds;
+    final mark = _markBytes;
+    if (mark != null && elapsed > _markMs) {
+      return _megabitsPerSecond(totalBytes - mark, elapsed - _markMs);
+    }
+    return _megabitsPerSecond(totalBytes, elapsed);
+  }
+
+  void stop() => _watch.stop();
+
+  void _report() {
+    final callback = onProgress;
+    if (callback == null) return;
+    final elapsed = _watch.elapsedMilliseconds;
+    if (elapsed < _progressWarmupMs) return;
+    if (elapsed - _lastReportMs < _progressIntervalMs) return;
+    _lastReportMs = elapsed;
+    callback(mbps);
+  }
 }
 
 /// POST body that reports each chunk as the socket accepts it.
@@ -423,9 +564,18 @@ class _UploadRequest extends http.BaseRequest {
   }
 
   Stream<List<int>> _chunks() async* {
-    for (var start = 0; start < _bytes.length; start += _uploadChunkSize) {
-      final end = min(start + _uploadChunkSize, _bytes.length);
-      yield _bytes.sublist(start, end);
+    final bytes = _bytes;
+    if (bytes is Uint8List) {
+      for (var start = 0; start < bytes.length; start += _uploadChunkSize) {
+        final end = min(start + _uploadChunkSize, bytes.length);
+        yield Uint8List.sublistView(bytes, start, end);
+        _onChunk(end - start);
+      }
+      return;
+    }
+    for (var start = 0; start < bytes.length; start += _uploadChunkSize) {
+      final end = min(start + _uploadChunkSize, bytes.length);
+      yield bytes.sublist(start, end);
       _onChunk(end - start);
     }
   }

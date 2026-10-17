@@ -7,9 +7,8 @@ repository: https://github.com/jorger5/speed_test_dart
 environment:
   sdk: '>=3.0.0 <4.0.0'
 
-dependencies: 
+dependencies:
   http: ^1.0.0
-  sync: ^0.3.0
   xml: ^6.3.0
 
 
